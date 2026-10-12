@@ -1,0 +1,254 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EntityStatus {
+  active
+  suspended
+  revoked
+}
+
+enum MemberRole {
+  owner
+  admin
+  editor
+  viewer
+}
+
+enum InstallationStatus {
+  pending
+  active
+  revoked
+  error
+}
+
+enum ContactSyncStatus {
+  local_only
+  synced
+  pending
+  conflict
+  failed
+}
+
+enum SyncDirection {
+  import
+  export
+}
+
+enum JobStatus {
+  pending
+  running
+  completed
+  partially_failed
+  failed
+}
+
+/// Empresa local. Una empresa se vincula como máximo a una subcuenta (location) de GHL.
+model Company {
+  id            String           @id @default(uuid()) @db.Uuid
+  name          String
+  ghlLocationId String?          @unique
+  status        EntityStatus     @default(active)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  memberships   Membership[]
+  installation  GhlInstallation?
+  contacts      Contact[]
+  syncJobs      SyncJob[]
+  auditLogs     AuditLog[]
+  sessions      Session[]
+}
+
+model User {
+  id           String       @id @default(uuid()) @db.Uuid
+  email        String       @unique
+  displayName  String
+  /// scrypt "salt:hash"; nulo si el usuario sólo accede vía contexto firmado de GHL.
+  passwordHash String?
+  ghlUserId    String?      @unique
+  status       EntityStatus @default(active)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  memberships  Membership[]
+  auditLogs    AuditLog[]
+  sessions     Session[]
+}
+
+model Membership {
+  id        String       @id @default(uuid()) @db.Uuid
+  userId    String       @db.Uuid
+  companyId String       @db.Uuid
+  role      MemberRole   @default(viewer)
+  status    EntityStatus @default(active)
+  createdAt DateTime     @default(now())
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company   Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, companyId])
+  @@index([companyId, status])
+}
+
+/// Sesión propia de la aplicación. El JWT sólo transporta el id de sesión; revocar la fila invalida el JWT.
+model Session {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  companyId  String    @db.Uuid
+  method     String
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastSeenAt DateTime  @default(now())
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+}
+
+model GhlInstallation {
+  id                  String             @id @default(uuid()) @db.Uuid
+  companyId           String             @unique @db.Uuid
+  ghlLocationId       String             @unique
+  ghlCompanyId        String?
+  installationStatus  InstallationStatus @default(pending)
+  grantedScopes       String[]
+  installedAt         DateTime?
+  revokedAt           DateTime?
+  lastCommunicationAt DateTime?
+  /// Último error sanitizado (código, nunca cuerpos de respuesta ni tokens).
+  lastErrorCode       String?
+  company             Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  credential          OAuthCredential?
+}
+
+/// Tokens OAuth cifrados con AES-256-GCM. La clave vive fuera de la base (TOKEN_ENCRYPTION_KEY).
+model OAuthCredential {
+  id                    String          @id @default(uuid()) @db.Uuid
+  installationId        String          @unique @db.Uuid
+  encryptedAccessToken  String
+  encryptedRefreshToken String
+  expiresAt             DateTime
+  tokenVersion          Int             @default(1)
+  updatedAt             DateTime        @updatedAt
+  installation          GhlInstallation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+}
+
+/// State OAuth de un solo uso. Sólo se guarda el hash SHA-256.
+model OAuthState {
+  id         String    @id @default(uuid()) @db.Uuid
+  stateHash  String    @unique
+  companyId  String    @db.Uuid
+  userId     String    @db.Uuid
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([expiresAt])
+}
+
+/// Protección anti-replay del contexto cifrado de Custom Pages.
+model GhlContextGrant {
+  id          String   @id @default(uuid()) @db.Uuid
+  payloadHash String   @unique
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+/// Deduplicación de webhooks (GHL reintenta hasta 12 veces).
+model GhlWebhookEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  bodyHash   String   @unique
+  type       String
+  locationId String?
+  receivedAt DateTime @default(now())
+}
+
+model Contact {
+  id               String            @id @default(uuid()) @db.Uuid
+  companyId        String            @db.Uuid
+  ghlContactId     String
+  firstName        String?
+  lastName         String?
+  email            String?
+  phone            String?
+  source           String            @default("ghl")
+  /// Quién originó el último valor aceptado: "ghl" (importación) o "local" (edición exportada).
+  origin           String            @default("ghl")
+  syncStatus       ContactSyncStatus @default(local_only)
+  lastSyncedAt     DateTime?
+  lastRemoteUpdate DateTime?
+  /// Hash de los campos remotos en la última sincronización; detecta cambios remotos aunque GHL no envíe fecha.
+  remoteHash       String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  company          Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  syncEvents       SyncEvent[]
+
+  @@unique([companyId, ghlContactId])
+  @@index([companyId, lastName, firstName])
+  @@index([companyId, email])
+  @@index([companyId, syncStatus])
+  @@index([companyId, updatedAt])
+}
+
+model SyncJob {
+  id                String        @id @default(uuid()) @db.Uuid
+  companyId         String        @db.Uuid
+  requestedById     String?       @db.Uuid
+  direction         SyncDirection
+  status            JobStatus     @default(pending)
+  idempotencyKey    String?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  totalRecords      Int           @default(0)
+  successfulRecords Int           @default(0)
+  failedRecords     Int           @default(0)
+  errorCode         String?
+  createdAt         DateTime      @default(now())
+  company           Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  events            SyncEvent[]
+
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, createdAt])
+}
+
+model SyncEvent {
+  id           String   @id @default(uuid()) @db.Uuid
+  syncJobId    String   @db.Uuid
+  contactId    String?  @db.Uuid
+  ghlContactId String?
+  operation    String
+  status       String
+  errorCode    String?
+  createdAt    DateTime @default(now())
+  syncJob      SyncJob  @relation(fields: [syncJobId], references: [id], onDelete: Cascade)
+  contact      Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  @@index([syncJobId, createdAt])
+  @@index([contactId])
+}
+
+model AuditLog {
+  id            String   @id @default(uuid()) @db.Uuid
+  companyId     String   @db.Uuid
+  actorId       String?  @db.Uuid
+  action        String
+  resourceType  String
+  resourceId    String?
+  /// Metadatos no sensibles (p. ej. nombres de campos modificados, nunca valores ni secretos).
+  metadata      Json?
+  correlationId String
+  createdAt     DateTime @default(now())
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  actor         User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, createdAt])
+  @@index([correlationId])
+}

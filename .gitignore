@@ -1,0 +1,26 @@
+# Dependencias
+node_modules/
+
+# Build de NestJS
+dist/
+*.tsbuildinfo
+
+# Pruebas
+coverage/
+
+# Variables de entorno (sólo se versiona el ejemplo). Nunca subir secretos ni tokens.
+.env
+.env.*
+!.env.example
+
+# Prisma: las migraciones SÍ se versionan; las bases locales no
+prisma/*.db
+prisma/*.db-journal
+
+# Logs y sistema
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

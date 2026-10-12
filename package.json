@@ -1,0 +1,55 @@
+{
+  "name": "@aida/backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "start:dev": "node ../scripts/with-env.mjs nest start --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "jest --runInBand --selectProjects unit",
+    "test:e2e": "node ../scripts/with-env.mjs jest --runInBand --selectProjects e2e",
+    "test:all": "node ../scripts/with-env.mjs jest --runInBand",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "node ../scripts/with-env.mjs prisma migrate dev",
+    "prisma:deploy": "node ../scripts/with-env.mjs prisma migrate deploy",
+    "prisma:seed": "node ../scripts/with-env.mjs tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.2.7",
+    "@nestjs/core": "^11.2.7",
+    "@nestjs/platform-express": "^11.2.7",
+    "@nestjs/swagger": "^11.2.0",
+    "@nestjs/throttler": "^6.7.1",
+    "@prisma/client": "6.19.3",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2",
+    "cookie-parser": "^1.4.7",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "prisma": "6.19.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "swagger-ui-express": "^5.0.1",
+    "tsx": "^4.20.6",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.10",
+    "@nestjs/schematics": "^11.0.7",
+    "@nestjs/testing": "^11.2.7",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.3",
+    "@types/jest": "^30.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.10.0",
+    "@types/supertest": "^7.2.1",
+    "jest": "^30.2.0",
+    "supertest": "^7.3.1",
+    "ts-jest": "^29.4.5",
+    "typescript": "^5.9.3"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}
