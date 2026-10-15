@@ -9,6 +9,8 @@ import { type ContactPatch, diffFields, fieldsHash, pickFields, type RemoteConta
 import { type GhlConnection, GhlContactsClient } from '../ghl/contacts/ghl-contacts.client';
 import { GhlApiError } from '../ghl/contacts/ghl-errors';
 import { GhlConnectionService } from '../ghl/ghl-connection.service';
+import { RESOURCE_KEYS, type SYNC_STATUS_VALUES } from '../ghl/provisioning/provisioning.manifest';
+import { ProvisioningService } from '../ghl/provisioning/provisioning.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { detectRemoteChange, remoteTouchedSince, signPreview, verifyPreview } from './conflict';
 import type { ExportDto, ImportDto, ListJobsQueryDto } from './sync.dto';
@@ -30,6 +32,7 @@ export class SyncService implements OnModuleInit {
     private readonly client: GhlContactsClient,
     private readonly connections: GhlConnectionService,
     private readonly audit: AuditService,
+    private readonly provisioning: ProvisioningService,
   ) {}
 
   /** Un proceso caído pudo dejar trabajos en "running": se cierran para no bloquear nuevas sincronizaciones. */
@@ -193,13 +196,16 @@ export class SyncService implements OnModuleInit {
     const started = await this.startJob(p, 'export', idempotencyKey);
     if (started.replayed) return this.getJob(p.companyId, started.jobId);
     const jobId = started.jobId;
+    const metadata = await this.metadataFieldIds(p.companyId);
 
     let success = 0;
     let failed = 0;
     let jobError: string | null = null;
     for (const c of contacts) {
       try {
-        (await this.exportOne(jobId, conn, c, !!dto.overwriteConflicts)).ok ? success++ : failed++;
+        const outcome = await this.exportOne(jobId, conn, c, !!dto.overwriteConflicts);
+        outcome.ok ? success++ : failed++;
+        if (outcome.ok && metadata) await this.writeMetadata(jobId, conn, c, metadata);
       } catch (e) {
         // Credenciales inválidas: no tiene sentido seguir con el resto del lote.
         jobError = errorCode(e);
@@ -269,6 +275,38 @@ export class SyncService implements OnModuleInit {
     }
     await this.event(jobId, c.id, c.ghlContactId, 'export.update', 'success', null);
     return { ok: true };
+  }
+
+  // ───────────────────────────── Metadatos AIDA en GHL ─────────────────────────────
+
+  /**
+   * IDs de "AIDA - ID externo" y "AIDA - Estado de sincronización" de ESTA location (ProvisionedResource).
+   * null si la escritura está desactivada (GHL_SYNC_METADATA_WRITE) o la configuración no los registró.
+   */
+  private async metadataFieldIds(companyId: string) {
+    if (!this.config.ghl.syncMetadataWrite) return null;
+    const ids = await this.provisioning.activeResourceIds(companyId);
+    const externalId = ids.get(RESOURCE_KEYS.externalId);
+    const syncStatus = ids.get(RESOURCE_KEYS.syncStatus);
+    return externalId && syncStatus ? { externalId, syncStatus } : null;
+  }
+
+  /**
+   * Escribe los metadatos sólo tras una exportación confirmada y exitosa (operación remota autorizada). Envía
+   * exclusivamente esos dos custom fields; un fallo se registra como evento propio sin alterar el resultado real
+   * de la exportación ya completada.
+   */
+  private async writeMetadata(jobId: string, conn: GhlConnection, c: Contact, ids: { externalId: string; syncStatus: string }) {
+    try {
+      await this.client.updateCustomFields(conn, c.ghlContactId, [
+        { id: ids.externalId, field_value: c.id },
+        { id: ids.syncStatus, field_value: 'synced' satisfies (typeof SYNC_STATUS_VALUES)[number] },
+      ]);
+      await this.event(jobId, c.id, c.ghlContactId, 'export.metadata', 'success', null);
+    } catch (e) {
+      if (e instanceof GhlApiError && ['GHL_UNAUTHORIZED', 'GHL_REFRESH_REJECTED', 'GHL_NOT_CONNECTED'].includes(e.code)) throw e;
+      await this.event(jobId, c.id, c.ghlContactId, 'export.metadata', 'failed', errorCode(e));
+    }
   }
 
   // ───────────────────────────── Trabajos ─────────────────────────────

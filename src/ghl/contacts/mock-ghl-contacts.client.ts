@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { ContactFields, ContactPatch, RemoteContact } from './ghl-contact.types';
 import { normalizeFields } from './ghl-contact.types';
-import { type GhlConnection, GhlContactsClient, type RemoteContactPage, type SearchParams } from './ghl-contacts.client';
+import { type CustomFieldWrite, type GhlConnection, GhlContactsClient, type RemoteContactPage, type SearchParams } from './ghl-contacts.client';
 import { GhlApiError } from './ghl-errors';
 
 const FIRST = ['Lucía', 'Mateo', 'Sofía', 'Diego', 'Valentina', 'Santiago', 'Camila', 'Emiliano', 'Regina', 'Leonardo', 'Ximena', 'Sebastián', 'Renata', 'Nicolás', 'Daniela', 'Gael', 'Mariana', 'Andrés'];
@@ -79,6 +79,14 @@ export class MockGhlContactsClient extends GhlContactsClient {
 
   async createContact(_conn: GhlConnection, _fields: ContactFields): Promise<RemoteContact> {
     throw new GhlApiError('GHL_FEATURE_DISABLED');
+  }
+
+  /** Metadatos escritos por contacto (sólo para inspección en modo simulado). */
+  readonly customFieldWrites = new Map<string, CustomFieldWrite[]>();
+
+  async updateCustomFields(conn: GhlConnection, contactId: string, fields: CustomFieldWrite[]): Promise<void> {
+    await this.getContact(conn, contactId);
+    this.customFieldWrites.set(contactId, fields);
   }
 
   /** Restablece el dataset simulado (usado por las pruebas). */

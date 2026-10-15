@@ -18,4 +18,11 @@ export abstract class GhlContactsClient {
   abstract updateContact(conn: GhlConnection, contactId: string, patch: ContactPatch): Promise<RemoteContact>;
   /** Deshabilitado salvo GHL_ALLOW_CONTACT_CREATE=true. Nunca se reintenta tras un error ambiguo (evita duplicados). */
   abstract createContact(conn: GhlConnection, fields: ContactFields): Promise<RemoteContact>;
+  /**
+   * PUT /contacts/{id} con SÓLO `customFields: [{ id, field_value }]` (UpdateContactDto oficial). No envía campos
+   * estándar. Los IDs provienen de ProvisionedResource de la misma location.
+   */
+  abstract updateCustomFields(conn: GhlConnection, contactId: string, fields: CustomFieldWrite[]): Promise<void>;
 }
+
+export type CustomFieldWrite = { id: string; field_value: string };

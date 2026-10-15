@@ -48,20 +48,49 @@ enum JobStatus {
   failed
 }
 
-/// Empresa local. Una empresa se vincula como máximo a una subcuenta (location) de GHL.
+/// Estado de la configuración automática (aprovisionamiento). Independiente de la instalación y de la sincronización.
+enum ConfigurationStatus {
+  pending
+  running
+  ready
+  requires_action
+  cancelled
+}
+
+enum ProvisioningStepStatus {
+  pending
+  running
+  succeeded
+  failed
+  requires_action
+  ambiguous
+  cancelled
+}
+
+/// Origen de un recurso remoto registrado: creado por esta app o adoptado (ya existía en la location).
+enum ResourceOrigin {
+  created
+  adopted
+}
+
+/// Empresa local = representación interna de UNA subcuenta (location) de GHL. No es la agencia GHL ni un
+/// Business del CRM. Una empresa se vincula como máximo a una location (ghlLocationId único).
+/// `name` es nulo cuando la empresa se registró automáticamente y el nombre no pudo verificarse con GHL.
 model Company {
-  id            String           @id @default(uuid()) @db.Uuid
-  name          String
-  ghlLocationId String?          @unique
-  status        EntityStatus     @default(active)
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
-  memberships   Membership[]
-  installation  GhlInstallation?
-  contacts      Contact[]
-  syncJobs      SyncJob[]
-  auditLogs     AuditLog[]
-  sessions      Session[]
+  id                     String                  @id @default(uuid()) @db.Uuid
+  name                   String?
+  ghlLocationId          String?                 @unique
+  status                 EntityStatus            @default(active)
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  memberships            Membership[]
+  installation           GhlInstallation?
+  contacts               Contact[]
+  syncJobs               SyncJob[]
+  auditLogs              AuditLog[]
+  sessions               Session[]
+  provisioningExecutions ProvisioningExecution[]
+  provisionedResources   ProvisionedResource[]
 }
 
 model User {
@@ -110,20 +139,51 @@ model Session {
   @@index([expiresAt])
 }
 
+/// Instalación de la app en una location. `ghlCompanyId` es el id de la AGENCIA GHL (no el id interno de Company).
 model GhlInstallation {
-  id                  String             @id @default(uuid()) @db.Uuid
-  companyId           String             @unique @db.Uuid
-  ghlLocationId       String             @unique
-  ghlCompanyId        String?
-  installationStatus  InstallationStatus @default(pending)
-  grantedScopes       String[]
-  installedAt         DateTime?
-  revokedAt           DateTime?
-  lastCommunicationAt DateTime?
+  id                     String                  @id @default(uuid()) @db.Uuid
+  companyId              String                  @unique @db.Uuid
+  ghlLocationId          String                  @unique
+  ghlCompanyId           String?
+  installationStatus     InstallationStatus      @default(pending)
+  grantedScopes          String[]
+  installedAt            DateTime?
+  revokedAt              DateTime?
+  lastCommunicationAt    DateTime?
   /// Último error sanitizado (código, nunca cuerpos de respuesta ni tokens).
-  lastErrorCode       String?
-  company             Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  credential          OAuthCredential?
+  lastErrorCode          String?
+  /// Se incrementa en cada reinstalación tras una baja: los trabajos de una generación anterior no se ejecutan.
+  generation             Int                     @default(1)
+  /// app_oauth (iniciada desde Contact Sync con state) | marketplace (callback sin state) | agency (token de agencia).
+  installSource          String                  @default("app_oauth")
+  /// Presente si el token de location se obtiene desde un token de agencia (POST /oauth/locationToken).
+  agencyGrantId          String?                 @db.Uuid
+  /// Copia del estado autoritativo de la última ejecución de configuración.
+  configurationStatus    ConfigurationStatus     @default(pending)
+  company                Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  credential             OAuthCredential?
+  agencyGrant            GhlAgencyGrant?         @relation(fields: [agencyGrantId], references: [id], onDelete: SetNull)
+  provisioningExecutions ProvisioningExecution[]
+
+  @@index([agencyGrantId])
+}
+
+/// Autorización a nivel AGENCIA (token userType=Company). Sólo se usa para obtener tokens de las locations
+/// donde la app está instalada; nunca concede acceso a locations no autorizadas.
+model GhlAgencyGrant {
+  id                    String            @id @default(uuid()) @db.Uuid
+  ghlCompanyId          String            @unique
+  /// active | revoked | error
+  status                String            @default("active")
+  grantedScopes         String[]
+  encryptedAccessToken  String?
+  encryptedRefreshToken String?
+  expiresAt             DateTime?
+  tokenVersion          Int               @default(1)
+  lastErrorCode         String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  installations         GhlInstallation[]
 }
 
 /// Tokens OAuth cifrados con AES-256-GCM. La clave vive fuera de la base (TOKEN_ENCRYPTION_KEY).
@@ -131,7 +191,8 @@ model OAuthCredential {
   id                    String          @id @default(uuid()) @db.Uuid
   installationId        String          @unique @db.Uuid
   encryptedAccessToken  String
-  encryptedRefreshToken String
+  /// Nulo para tokens de location obtenidos desde un token de agencia (no incluyen refresh token).
+  encryptedRefreshToken String?
   expiresAt             DateTime
   tokenVersion          Int             @default(1)
   updatedAt             DateTime        @updatedAt
@@ -162,12 +223,19 @@ model GhlContextGrant {
 }
 
 /// Deduplicación de webhooks (GHL reintenta hasta 12 veces).
+/// processingStatus: processed | pending (INSTALL recibido antes del token) | ignored.
 model GhlWebhookEvent {
-  id         String   @id @default(uuid()) @db.Uuid
-  bodyHash   String   @unique
-  type       String
-  locationId String?
-  receivedAt DateTime @default(now())
+  id               String    @id @default(uuid()) @db.Uuid
+  bodyHash         String    @unique
+  webhookId        String?   @unique
+  type             String
+  locationId       String?
+  ghlCompanyId     String?
+  processingStatus String    @default("processed")
+  processedAt      DateTime?
+  receivedAt       DateTime  @default(now())
+
+  @@index([locationId, type, processingStatus])
 }
 
 model Contact {
@@ -251,4 +319,85 @@ model AuditLog {
 
   @@index([companyId, createdAt])
   @@index([correlationId])
+}
+
+/// Ejecución persistente de la configuración automática de una location (cola respaldada por PostgreSQL).
+/// Un índice único parcial (ver migración) impide más de una ejecución activa (pending/running) por instalación.
+model ProvisioningExecution {
+  id                     String              @id @default(uuid()) @db.Uuid
+  installationId         String              @db.Uuid
+  installationGeneration Int
+  companyId              String              @db.Uuid
+  ghlLocationId          String
+  manifestVersion        Int
+  /// oauth_callback | marketplace_install | agency_install | webhook_install | user_retry
+  trigger                String
+  status                 ConfigurationStatus @default(pending)
+  attempts               Int                 @default(0)
+  maxAttempts            Int                 @default(6)
+  nextAttemptAt          DateTime            @default(now())
+  /// Bloqueo temporal (lease) + token de cercado: un trabajador obsoleto no puede escribir resultados.
+  lockedBy               String?
+  lockedUntil            DateTime?
+  leaseToken             Int                 @default(0)
+  startedAt              DateTime?
+  finishedAt             DateTime?
+  lastErrorCode          String?
+  missingScopes          String[]
+  correlationId          String
+  requestedById          String?             @db.Uuid
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  installation           GhlInstallation     @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  company                Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  steps                  ProvisioningStep[]
+
+  @@index([status, nextAttemptAt])
+  @@index([companyId, createdAt])
+  @@index([installationId, createdAt])
+}
+
+model ProvisioningStep {
+  id          String                 @id @default(uuid()) @db.Uuid
+  executionId String                 @db.Uuid
+  resourceKey String
+  status      ProvisioningStepStatus @default(pending)
+  attempts    Int                    @default(0)
+  /// created | adopted | verified | updated | recreated | conflict_* | ambiguous_match | pending_reconciliation | missing_scopes
+  outcome     String?
+  errorCode   String?
+  remoteId    String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  execution   ProvisioningExecution  @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@unique([executionId, resourceKey])
+}
+
+/// Recurso remoto de GHL registrado para una location. Fuente de los IDs remotos (nunca IDs fijos de otra location).
+model ProvisionedResource {
+  id               String          @id @default(uuid()) @db.Uuid
+  companyId        String          @db.Uuid
+  ghlLocationId    String
+  resourceKey      String
+  resourceType     String
+  remoteId         String?
+  remoteKey        String?
+  remoteName       String?
+  manifestVersion  Int
+  origin           ResourceOrigin?
+  managementPolicy String
+  /// missing | creating (intención registrada antes del POST) | pending_reconciliation | active | conflict
+  status           String          @default("missing")
+  /// Creaciones con resultado ambiguo (timeout/5xx) aún no confirmadas.
+  ambiguousCount   Int             @default(0)
+  lastVerifiedAt   DateTime?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  company          Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([ghlLocationId, resourceKey])
+  @@unique([companyId, resourceKey])
 }

@@ -28,12 +28,21 @@ const schema = z.object({
   GHL_APP_SHARED_SECRET: z.string().optional().default(''),
   GHL_APP_ID: z.string().optional().default(''),
   GHL_REDIRECT_URI: z.string().optional().default(''),
-  GHL_SCOPES: z.string().default('contacts.readonly contacts.write'),
+  GHL_SCOPES: z.string().default('contacts.readonly contacts.write locations/customFields.readonly locations/customFields.write locations/customValues.readonly locations/customValues.write'),
   GHL_AUTHORIZE_URL: z.string().url().default('https://marketplace.gohighlevel.com/v2/oauth/chooselocation'),
   GHL_API_BASE: z.string().url().default('https://services.leadconnectorhq.com'),
   GHL_API_VERSION: z.string().min(1).default('2021-07-28'),
   GHL_WEBHOOK_PUBLIC_KEY: z.string().optional().default(''),
   GHL_ALLOW_CONTACT_CREATE: bool,
+  // Instalación iniciada desde Marketplace (callback SIN state propio). Desactivado por defecto: activarlo es una
+  // decisión explícita. La legitimidad proviene del intercambio del code con el Client Secret, nunca de la sesión.
+  GHL_MARKETPLACE_INSTALL_ENABLED: bool,
+  // Escritura de metadatos AIDA (custom fields) en contactos durante exportaciones autorizadas. Desactivado hasta
+  // validar con GHL real la semántica de PUT /contacts/{id} con customFields.
+  GHL_SYNC_METADATA_WRITE: bool,
+  PROVISIONING_WORKER_ENABLED: z.enum(['true', 'false', '1', '0']).default('true').transform(v => v === 'true' || v === '1'),
+  PROVISIONING_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(600_000).default(5_000),
+  PROVISIONING_LEASE_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(120_000),
 });
 
 export type AppConfig = {
@@ -61,7 +70,10 @@ export type AppConfig = {
     apiVersion: string;
     webhookPublicKey: string;
     allowContactCreate: boolean;
+    marketplaceInstallEnabled: boolean;
+    syncMetadataWrite: boolean;
   };
+  provisioning: { workerEnabled: boolean; pollIntervalMs: number; leaseMs: number };
 };
 
 export class ConfigError extends Error {}
@@ -111,7 +123,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       apiVersion: e.GHL_API_VERSION,
       webhookPublicKey: e.GHL_WEBHOOK_PUBLIC_KEY || GHL_OFFICIAL_WEBHOOK_PUBLIC_KEY,
       allowContactCreate: e.GHL_ALLOW_CONTACT_CREATE,
+      marketplaceInstallEnabled: e.GHL_MARKETPLACE_INSTALL_ENABLED,
+      syncMetadataWrite: e.GHL_SYNC_METADATA_WRITE,
     },
+    provisioning: { workerEnabled: e.PROVISIONING_WORKER_ENABLED, pollIntervalMs: e.PROVISIONING_POLL_INTERVAL_MS, leaseMs: e.PROVISIONING_LEASE_MS },
   };
 }
 

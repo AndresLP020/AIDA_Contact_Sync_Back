@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { APP_CONFIG, type AppConfig } from '../../config/app-config';
 import { FETCH, type FetchFn, GhlTokenService } from '../tokens/ghl-token.service';
 import { type ContactFields, type ContactPatch, parseRemoteContact, type RemoteContact } from './ghl-contact.types';
-import { type GhlConnection, GhlContactsClient, type RemoteContactPage, type SearchParams } from './ghl-contacts.client';
+import { type CustomFieldWrite, type GhlConnection, GhlContactsClient, type RemoteContactPage, type SearchParams } from './ghl-contacts.client';
 import { GhlApiError } from './ghl-errors';
 import { GhlHttp, type GhlHttpOptions, type TokenProvider } from './ghl-http';
 
@@ -21,6 +21,7 @@ const singleResponseSchema = z.object({ contact: z.unknown() });
  *   GET  /contacts/{contactId}  (scope contacts.readonly)
  *   PUT  /contacts/{contactId}  (scope contacts.write)
  *   POST /contacts/             (scope contacts.write; sólo si GHL_ALLOW_CONTACT_CREATE=true)
+ *   PUT  /contacts/{contactId}  { customFields: [{ id, field_value }] } (contacts.write; sólo si GHL_SYNC_METADATA_WRITE=true)
  */
 @Injectable()
 export class HttpGhlContactsClient extends GhlContactsClient {
@@ -82,6 +83,14 @@ export class HttpGhlContactsClient extends GhlContactsClient {
       this.tokenProvider(conn),
     );
     return this.assertLocation(conn, this.single(raw));
+  }
+
+  async updateCustomFields(conn: GhlConnection, contactId: string, fields: CustomFieldWrite[]): Promise<void> {
+    const raw = await this.http.request(
+      { method: 'PUT', path: `/contacts/${encodeURIComponent(contactId)}`, retry: 'idempotent', body: { customFields: fields } },
+      this.tokenProvider(conn),
+    );
+    this.assertLocation(conn, this.single(raw));
   }
 
   private single(raw: unknown): RemoteContact {

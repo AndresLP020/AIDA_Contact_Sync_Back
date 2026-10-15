@@ -46,7 +46,7 @@ export async function createTestApp(env: Record<string, string> = {}, fetchFn?: 
   };
 }
 
-const TABLES = ['AuditLog', 'SyncEvent', 'SyncJob', 'Contact', 'OAuthCredential', 'GhlInstallation', 'OAuthState', 'GhlContextGrant', 'GhlWebhookEvent', 'Session', 'Membership', 'User', 'Company'];
+const TABLES = ['ProvisioningStep', 'ProvisioningExecution', 'ProvisionedResource', 'GhlAgencyGrant', 'AuditLog', 'SyncEvent', 'SyncJob', 'Contact', 'OAuthCredential', 'GhlInstallation', 'OAuthState', 'GhlContextGrant', 'GhlWebhookEvent', 'Session', 'Membership', 'User', 'Company'];
 
 export async function resetDb(prisma: PrismaClient) {
   await prisma.$executeRawUnsafe(`TRUNCATE ${TABLES.map(t => `"${t}"`).join(', ')} CASCADE`);

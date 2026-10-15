@@ -11,3 +11,5 @@ process.env.LOGIN_RATE_LIMIT_PER_MINUTE = '1000';
 process.env.RATE_LIMIT_PER_MINUTE = '100000';
 process.env.SESSION_TTL_MINUTES = '30';
 process.env.OAUTH_CALLBACK_RATE_LIMIT_PER_MINUTE = '1000';
+// El procesador de configuración se ejecuta de forma determinista desde las pruebas (worker.drain()).
+process.env.PROVISIONING_WORKER_ENABLED = 'false';

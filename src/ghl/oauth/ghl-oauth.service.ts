@@ -6,14 +6,22 @@ import { badRequest } from '../../common/errors';
 import type { Principal } from '../../common/request-context';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GhlApiError } from '../contacts/ghl-errors';
-import { TokenCipher } from '../tokens/token-cipher.service';
+import { AgencyInstallationService } from '../installation/agency-installation.service';
+import { LocationRegistrationService } from '../installation/location-registration.service';
 import { GhlTokenService, type TokenResponse } from '../tokens/ghl-token.service';
 
 export const STATE_TTL_MS = 10 * 60_000;
+/** Scopes imprescindibles para CONECTAR (sincronización de contactos). Los de aprovisionamiento no se exigen aquí. */
 export const REQUIRED_SCOPES = ['contacts.readonly'];
 
 export type CallbackOutcome =
   | 'connected'
+  | 'installed'
+  | 'agency_installed'
+  | 'agency_missing_scopes'
+  | 'agency_app_id_missing'
+  | 'agency_lookup_failed'
+  | 'agency_conflict'
   | 'denied'
   | 'invalid_request'
   | 'invalid_state'
@@ -25,6 +33,7 @@ export type CallbackOutcome =
   | 'location_already_linked';
 
 export const hashState = (state: string) => createHash('sha256').update(state).digest('hex');
+const parseScopes = (scope: string) => scope.split(/[\s,]+/).filter(Boolean);
 
 @Injectable()
 export class GhlOAuthService {
@@ -34,8 +43,9 @@ export class GhlOAuthService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     private readonly prisma: PrismaService,
     private readonly tokens: GhlTokenService,
-    private readonly cipher: TokenCipher,
     private readonly audit: AuditService,
+    private readonly registration: LocationRegistrationService,
+    private readonly agency: AgencyInstallationService,
   ) {}
 
   /**
@@ -56,13 +66,21 @@ export class GhlOAuthService {
   }
 
   /**
-   * Procesa el callback. El state puede llegar por query (si GHL lo devuelve) y/o por la cookie HttpOnly
-   * puesta en /oauth/start. Si llegan ambos deben coincidir. Se consume atómicamente antes del intercambio.
+   * Procesa el callback.
+   *  - Con state (query y/o cookie HttpOnly de /oauth/start): flujo iniciado desde Contact Sync. Si llegan ambos
+   *    deben coincidir; se consume atómicamente antes del intercambio y liga la location a la empresa del state.
+   *  - SIN state ni cookie: instalación iniciada desde Marketplace, sólo si GHL_MARKETPLACE_INSTALL_ENABLED=true.
+   *    La legitimidad proviene del intercambio del code con el Client Secret (GHL devuelve la location verificada);
+   *    NO se vincula a ninguna sesión ni usuario local y no se concede ningún rol.
+   *  - Un state presente pero inválido nunca cae al flujo de Marketplace.
    */
   async callback(input: { code?: string; queryState?: string; cookieState?: string; error?: string }, correlationId: string): Promise<CallbackOutcome> {
     if (input.error) return 'denied';
     const { code, queryState, cookieState } = input;
     if (!code || code.length > 2048) return 'invalid_request';
+    if (!queryState && !cookieState) {
+      return this.config.ghl.marketplaceInstallEnabled ? this.marketplaceInstall(code, correlationId) : 'invalid_state';
+    }
     if (queryState && cookieState && queryState !== cookieState) return 'invalid_state';
     const state = queryState ?? cookieState;
     if (!state || state.length > 512) return 'invalid_state';
@@ -78,45 +96,64 @@ export class GhlOAuthService {
     const membership = await this.prisma.membership.findFirst({ where: { userId: saved.userId, companyId: saved.companyId, status: 'active', role: { in: ['owner', 'admin'] } } });
     if (!membership) return 'invalid_state';
 
-    let data: TokenResponse;
+    const data = await this.exchange(code, correlationId);
+    if (typeof data === 'string') return data;
+    if (data.userType && data.userType !== 'Location') return 'not_location_install';
+    if (!data.locationId) return 'not_location_install';
+    const scopes = parseScopes(data.scope);
+    if (scopes.length && !REQUIRED_SCOPES.every(s => scopes.includes(s))) return 'missing_scopes';
+
+    const verifiedName = await this.registration.fetchVerifiedName({ locationId: data.locationId, accessToken: data.access_token, scopes });
+    const result = await this.registration.register({
+      locationId: data.locationId,
+      agencyId: data.companyId ?? null,
+      scopes,
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresIn: data.expires_in,
+      source: 'app_oauth',
+      verifiedName,
+      bind: { companyId: saved.companyId, userId: saved.userId },
+      trigger: 'oauth_callback',
+      correlationId,
+    });
+    return result.outcome === 'registered' ? 'connected' : result.outcome;
+  }
+
+  private async marketplaceInstall(code: string, correlationId: string): Promise<CallbackOutcome> {
+    const data = await this.exchange(code, correlationId);
+    if (typeof data === 'string') return data;
+    if (data.userType === 'Company') {
+      const r = await this.agency.install(data, correlationId);
+      return r.outcome;
+    }
+    if (!data.locationId) return 'not_location_install';
+    const scopes = parseScopes(data.scope);
+    if (scopes.length && !REQUIRED_SCOPES.every(s => scopes.includes(s))) return 'missing_scopes';
+    const verifiedName = await this.registration.fetchVerifiedName({ locationId: data.locationId, accessToken: data.access_token, scopes });
+    const result = await this.registration.register({
+      locationId: data.locationId,
+      agencyId: data.companyId ?? null,
+      scopes,
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresIn: data.expires_in,
+      source: 'marketplace',
+      verifiedName,
+      trigger: 'marketplace_install',
+      correlationId,
+    });
+    this.logger.log({ msg: 'ghl_marketplace_install', outcome: result.outcome, correlationId });
+    return result.outcome === 'registered' ? 'installed' : result.outcome;
+  }
+
+  private async exchange(code: string, correlationId: string): Promise<TokenResponse | CallbackOutcome> {
     try {
-      data = await this.tokens.exchangeCode(code);
+      return await this.tokens.exchangeCode(code);
     } catch (e) {
       this.logger.warn({ msg: 'ghl_code_exchange_failed', code: e instanceof GhlApiError ? e.code : 'UNKNOWN', correlationId });
       return e instanceof GhlApiError && e.code === 'GHL_INVALID_RESPONSE' ? 'invalid_token_response' : 'exchange_failed';
     }
-    if (data.userType && data.userType !== 'Location') return 'not_location_install';
-    if (!data.locationId) return 'not_location_install';
-    const scopes = data.scope.split(/[\s,]+/).filter(Boolean);
-    if (scopes.length && !REQUIRED_SCOPES.every(s => scopes.includes(s))) return 'missing_scopes';
-
-    const company = await this.prisma.company.findUniqueOrThrow({ where: { id: saved.companyId } });
-    if (company.ghlLocationId && company.ghlLocationId !== data.locationId) return 'location_mismatch';
-    const other = await this.prisma.ghlInstallation.findFirst({ where: { ghlLocationId: data.locationId, companyId: { not: company.id } } });
-    const otherCompany = await this.prisma.company.findFirst({ where: { ghlLocationId: data.locationId, id: { not: company.id } } });
-    if (other || otherCompany) return 'location_already_linked';
-
-    const locationId = data.locationId;
-    await this.prisma.$transaction(async tx => {
-      await tx.company.update({ where: { id: company.id }, data: { ghlLocationId: locationId } });
-      const installation = await tx.ghlInstallation.upsert({
-        where: { companyId: company.id },
-        create: { companyId: company.id, ghlLocationId: locationId, ghlCompanyId: data.companyId ?? null, installationStatus: 'active', grantedScopes: scopes, installedAt: new Date(), lastCommunicationAt: new Date() },
-        update: { ghlLocationId: locationId, ghlCompanyId: data.companyId ?? null, installationStatus: 'active', grantedScopes: scopes, installedAt: new Date(), revokedAt: null, lastCommunicationAt: new Date(), lastErrorCode: null },
-      });
-      const encrypted = {
-        encryptedAccessToken: this.cipher.encrypt(data.access_token, installation.id),
-        encryptedRefreshToken: this.cipher.encrypt(data.refresh_token, installation.id),
-        expiresAt: new Date(Date.now() + data.expires_in * 1000),
-      };
-      await tx.oAuthCredential.upsert({
-        where: { installationId: installation.id },
-        create: { installationId: installation.id, ...encrypted },
-        update: { ...encrypted, tokenVersion: { increment: 1 } },
-      });
-      await this.audit.record({ companyId: company.id, actorId: saved.userId, action: 'ghl.connected', resourceType: 'GhlInstallation', resourceId: installation.id, correlationId, metadata: { scopes } }, tx);
-    });
-    return 'connected';
   }
 
   /**
@@ -138,11 +175,34 @@ export class GhlOAuthService {
     return true;
   }
 
+  /** UNINSTALL a nivel agencia: revoca el grant de agencia y las instalaciones que dependen de él. */
+  async handleAgencyUninstall(agencyId: string) {
+    const grant = await this.prisma.ghlAgencyGrant.findUnique({ where: { ghlCompanyId: agencyId }, include: { installations: { where: { installationStatus: { not: 'revoked' } } } } });
+    if (!grant) return 0;
+    await this.prisma.ghlAgencyGrant.update({ where: { id: grant.id }, data: { status: 'revoked', encryptedAccessToken: null, encryptedRefreshToken: null } });
+    for (const i of grant.installations) await this.revokeInstallation(i.id, i.companyId, null, 'ghl.uninstalled', randomUUID());
+    return grant.installations.length;
+  }
+
+  /**
+   * Baja: credenciales inutilizadas, instalación revocada, trabajos de configuración pendientes/en curso cancelados
+   * (un trabajador en curso pierde su lease y no puede escribir más) y sesiones obtenidas vía contexto de GHL
+   * revocadas. NO se borran contactos, custom fields, custom values ni el historial técnico.
+   */
   private async revokeInstallation(installationId: string, companyId: string, actorId: string | null, action: string, correlationId: string) {
     await this.prisma.$transaction(async tx => {
       await tx.oAuthCredential.deleteMany({ where: { installationId } });
-      await tx.ghlInstallation.update({ where: { id: installationId }, data: { installationStatus: 'revoked', revokedAt: new Date() } });
-      await this.audit.record({ companyId, actorId, action, resourceType: 'GhlInstallation', resourceId: installationId, correlationId }, tx);
+      await tx.ghlInstallation.update({ where: { id: installationId }, data: { installationStatus: 'revoked', revokedAt: new Date(), configurationStatus: 'cancelled' } });
+      const active = await tx.provisioningExecution.findMany({ where: { installationId, status: { in: ['pending', 'running'] } }, select: { id: true, status: true } });
+      if (active.length) {
+        await tx.provisioningExecution.updateMany({ where: { id: { in: active.map(a => a.id) } }, data: { status: 'cancelled', finishedAt: new Date(), lockedUntil: null, lastErrorCode: 'INSTALLATION_REVOKED' } });
+        await tx.provisioningStep.updateMany({ where: { executionId: { in: active.map(a => a.id) }, status: { in: ['pending', 'running'] } }, data: { status: 'cancelled' } });
+      }
+      const sessions = await tx.session.updateMany({ where: { companyId, method: 'ghl_context', revokedAt: null }, data: { revokedAt: new Date() } });
+      await this.audit.record(
+        { companyId, actorId, action, resourceType: 'GhlInstallation', resourceId: installationId, correlationId, metadata: { cancelledExecutions: active.length, executionWasRunning: active.some(a => a.status === 'running'), revokedGhlSessions: sessions.count } },
+        tx,
+      );
     });
   }
 }
