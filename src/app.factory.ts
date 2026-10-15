@@ -14,7 +14,8 @@ export function configureApp(app: NestExpressApplication, logger: JsonLogger): I
   app.disable('x-powered-by');
   app.setGlobalPrefix('api/v1');
   app.use(correlationMiddleware);
-  app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'same-site' }, hsts: config.isProduction }));
+  // La API (Render) y el frontend (Vercel) son sitios distintos: el navegador debe poder leer las respuestas.
+  app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' }, hsts: config.isProduction }));
   app.use(cookieParser());
   app.enableCors({
     origin: config.frontendOrigins,
