@@ -46,8 +46,8 @@ export async function seed(prisma: PrismaClient, password = process.env.SEED_DEM
 }
 
 async function main() {
-  if (process.env.NODE_ENV === 'production') {
-    console.error('Seed de datos ficticios bloqueado en producción.');
+  if (process.env.NODE_ENV === 'production' && process.env.SEED_DEMO_DATA !== 'true') {
+    console.error('Seed de datos ficticios bloqueado en producción. Define SEED_DEMO_DATA=true para cargarlos.');
     process.exit(1);
   }
   const prisma = new PrismaClient();

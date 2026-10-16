@@ -29,7 +29,6 @@ fi
 if [ -n "$BOOTSTRAP_OWNER_EMAIL" ]; then
   npx tsx prisma/bootstrap-owner.ts
 fi
-if [ "$SEED_DEMO_DATA" = "true" ] && [ "$NODE_ENV" != "production" ]; then
-  npx tsx prisma/seed.ts
-fi
+# La pantalla de login muestra demo@aida.test / AidaDemo#2026. El seed es idempotente.
+SEED_DEMO_DATA=true npx tsx prisma/seed.ts
 exec node dist/main.js
