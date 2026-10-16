@@ -12,7 +12,7 @@ if ! printf '%s' "$DATABASE_URL" | grep -q 'schema='; then
   admin_url=$DATABASE_URL
   admin_url=${admin_url%\?schema=aida}
   admin_url=${admin_url%\&schema=aida}
-  DATABASE_URL="$admin_url" npx prisma db execute --stdin <<'SQL'
+  npx prisma db execute --url "$admin_url" --stdin <<'SQL'
 CREATE SCHEMA IF NOT EXISTS aida;
 SQL
 fi
