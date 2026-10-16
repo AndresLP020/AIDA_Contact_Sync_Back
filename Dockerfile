@@ -25,5 +25,6 @@ COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
 COPY --from=build /app/dist ./dist
 RUN npx prisma generate && chmod +x docker-entrypoint.sh
 USER node
-EXPOSE 4000
+# Render inyecta PORT=10000 y detecta el puerto con esta instrucción.
+EXPOSE 10000
 ENTRYPOINT ["./docker-entrypoint.sh"]
