@@ -154,7 +154,8 @@ export class AuthController {
     try {
       await this.prisma.ghlContextGrant.create({ data: { payloadHash: createHash('sha256').update(body.encryptedData).digest('hex'), expiresAt: new Date(Date.now() + 24 * 3600_000) } });
     } catch {
-      throw rejected('replayed');
+      // El administrador de agencia reabre la misma Custom Page: HighLevel repite el contexto. La sesión sigue siendo la de la subcuenta.
+      if (!agencyUser) throw rejected('replayed');
     }
 
     const session = await this.sessions.create(user.id, company.id, 'ghl_context');

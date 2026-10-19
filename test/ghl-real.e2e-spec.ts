@@ -357,13 +357,16 @@ describe('Integración GHL en modo real (API simulada por HTTP)', () => {
     it('un administrador de agencia entra como la subcuenta, no con su correo', async () => {
       const company = await t.prisma.company.create({ data: { name: 'San Salvador', ghlLocationId: 'loc_agencia' } });
       await t.prisma.ghlInstallation.create({ data: { companyId: company.id, ghlLocationId: 'loc_agencia', installationStatus: 'active', grantedScopes: ['contacts.readonly'], installedAt: new Date() } });
-      const res = await post(ctx({ activeLocation: 'loc_agencia', email: 'andres@agencia.test', userId: 'ghl_andres', userName: 'Andrés' }));
+      const payload = ctx({ activeLocation: 'loc_agencia', email: 'andres@agencia.test', userId: 'ghl_andres', userName: 'Andrés' });
+      const res = await post(payload);
       expect(res.status).toBe(200);
       const me = await request(t.app.getHttpServer()).get('/api/v1/auth/me').set('Cookie', String(res.headers['set-cookie']).split(';')[0]);
       expect(me.body.user.email).toBe('loc_agencia@subcuenta.aida');
       expect(me.body.user.displayName).toBe('San Salvador');
       expect(me.body.company.id).toBe(company.id);
       expect(await t.prisma.user.findUnique({ where: { email: 'andres@agencia.test' } })).toBeNull();
+      const again = await post(payload);
+      expect(again.status).toBe(200);
     });
 
     it('rechaza location no vinculada, usuario sin membresía, secreto incorrecto y sin subcuenta activa', async () => {
