@@ -151,11 +151,13 @@ export class AuthController {
     if (!access) throw rejected('unmapped_user');
     const { user } = access;
 
+    const payloadHash = createHash('sha256').update(body.encryptedData).digest('hex');
     try {
-      await this.prisma.ghlContextGrant.create({ data: { payloadHash: createHash('sha256').update(body.encryptedData).digest('hex'), expiresAt: new Date(Date.now() + 24 * 3600_000) } });
+      await this.prisma.ghlContextGrant.create({ data: { payloadHash, expiresAt: new Date(Date.now() + 24 * 3600_000) } });
     } catch {
-      // El administrador de agencia reabre la misma Custom Page: HighLevel repite el contexto. La sesión sigue siendo la de la subcuenta.
-      if (!agencyUser) throw rejected('replayed');
+      // HighLevel reenvía el mismo contexto al reabrir la Custom Page (también desde el dominio white-label). Si sigue vigente, se emite otra sesión.
+      const existing = await this.prisma.ghlContextGrant.findUnique({ where: { payloadHash } });
+      if (!existing || existing.expiresAt.getTime() <= Date.now()) throw rejected('replayed');
     }
 
     const session = await this.sessions.create(user.id, company.id, 'ghl_context');

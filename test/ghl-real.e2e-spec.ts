@@ -341,7 +341,7 @@ describe('Integración GHL en modo real (API simulada por HTTP)', () => {
       const me = await request(t.app.getHttpServer()).get('/api/v1/auth/me').set('Cookie', cookie.split(';')[0]);
       expect(me.body.company.id).toBe(NORTE);
       expect((await t.prisma.user.findUniqueOrThrow({ where: { email: 'demo@aida.test' } })).ghlUserId).toBe('ghl_user_1');
-      expect((await post(payload)).status).toBe(401); // anti-replay
+      expect((await post(payload)).status).toBe(200); // HighLevel reenvía el mismo contexto al reabrir la página
     });
 
     it('el primer usuario de una subcuenta sin miembros entra como propietario', async () => {
