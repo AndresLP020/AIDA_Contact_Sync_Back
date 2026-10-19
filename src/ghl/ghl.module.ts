@@ -8,7 +8,7 @@ import { GhlConnectionService } from './ghl-connection.service';
 import { AgencyInstallationService } from './installation/agency-installation.service';
 import { LocationRegistrationService } from './installation/location-registration.service';
 import { IntegrationsController } from './integrations.controller';
-import { GhlOAuthController } from './oauth/ghl-oauth.controller';
+import { GhlOAuthAliasController, GhlOAuthController } from './oauth/ghl-oauth.controller';
 import { GhlOAuthService } from './oauth/ghl-oauth.service';
 import { GhlProvisioningClient, HttpGhlProvisioningClient, MockGhlProvisioningClient } from './provisioning/ghl-provisioning.client';
 import { ProvisioningController } from './provisioning/provisioning.controller';
@@ -21,7 +21,7 @@ import { GhlWebhooksController } from './webhooks/ghl-webhooks.controller';
 
 @Module({
   imports: [AuditModule],
-  controllers: [IntegrationsController, GhlOAuthController, GhlWebhooksController, ProvisioningController],
+  controllers: [IntegrationsController, GhlOAuthController, GhlOAuthAliasController, GhlWebhooksController, ProvisioningController],
   providers: [
     { provide: FETCH, useValue: (...args: Parameters<typeof fetch>) => fetch(...args) },
     // Ajustes del transporte HTTP (vacío = valores por defecto). Las pruebas lo sustituyen para no esperar.
