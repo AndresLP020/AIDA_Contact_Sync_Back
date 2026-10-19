@@ -114,13 +114,31 @@ export class AuthController {
     if (this.config.ghl.mode === 'real' && installation?.installationStatus !== 'active') throw rejected('installation_inactive');
 
     const email = ctx.email.toLowerCase();
+    const agencyUser = (ctx.type ?? '').toLowerCase() === 'agency';
     const access = await this.prisma.$transaction(async tx => {
+      // Un administrador de agencia que abre la subcuenta no se convierte en el usuario de esa empresa.
+      // La sesión es de la subcuenta instalada.
+      if (agencyUser) {
+        const locationKey = `location:${ctx.activeLocation}`;
+        const displayName = ctx.activeLocationName?.trim() || ctx.locationName?.trim() || company.name?.trim() || 'Subcuenta';
+        const locationEmail = `${ctx.activeLocation!.toLowerCase()}@subcuenta.aida`;
+        const user = await tx.user.upsert({
+          where: { ghlUserId: locationKey },
+          create: { email: locationEmail, displayName, ghlUserId: locationKey },
+          update: { displayName },
+        });
+        const membership = await tx.membership.upsert({
+          where: { userId_companyId: { userId: user.id, companyId: company.id } },
+          create: { userId: user.id, companyId: company.id, role: 'owner' },
+          update: { status: 'active' },
+        });
+        return { user, membership };
+      }
       const memberCount = await tx.membership.count({ where: { companyId: company.id, status: 'active' } });
       let user = await tx.user.findFirst({ where: { status: 'active', OR: [{ ghlUserId: ctx.userId }, { email }] } });
       if (user?.ghlUserId && user.ghlUserId !== ctx.userId) return null;
       const membership = user ? await tx.membership.findFirst({ where: { userId: user.id, companyId: company.id, status: 'active' } }) : null;
       if (user && membership) return { user, membership };
-      // La instalación desde Marketplace crea la empresa sin miembros. El primer usuario de esa subcuenta entra como propietario.
       if (memberCount > 0) return null;
       if (!user) {
         user = await tx.user.create({ data: { email, displayName: ctx.userName?.trim() || email, ghlUserId: ctx.userId } });

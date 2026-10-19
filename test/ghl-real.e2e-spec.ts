@@ -333,7 +333,7 @@ describe('Integración GHL en modo real (API simulada por HTTP)', () => {
 
     it('contexto válido de un usuario vinculado crea sesión y fija ghlUserId', async () => {
       await connect();
-      const payload = ctx();
+      const payload = ctx({ type: 'account' });
       const res = await post(payload);
       expect(res.status).toBe(200);
       const cookie = String(res.headers['set-cookie']);
@@ -347,18 +347,29 @@ describe('Integración GHL en modo real (API simulada por HTTP)', () => {
     it('el primer usuario de una subcuenta sin miembros entra como propietario', async () => {
       const company = await t.prisma.company.create({ data: { name: 'Subcuenta nueva', ghlLocationId: 'loc_sin_miembros' } });
       await t.prisma.ghlInstallation.create({ data: { companyId: company.id, ghlLocationId: 'loc_sin_miembros', installationStatus: 'active', grantedScopes: ['contacts.readonly'], installedAt: new Date() } });
-      const res = await post(ctx({ activeLocation: 'loc_sin_miembros', email: 'andres@agencia.test', userId: 'ghl_andres', userName: 'Andrés' }));
+      const res = await post(ctx({ type: 'account', activeLocation: 'loc_sin_miembros', email: 'persona@subcuenta.test', userId: 'ghl_persona', userName: 'Persona' }));
       expect(res.status).toBe(200);
-      const membership = await t.prisma.membership.findFirstOrThrow({ where: { companyId: company.id }, include: { user: true } });
+      const membership = await t.prisma.membership.findFirstOrThrow({ where: { companyId: company.id, user: { email: 'persona@subcuenta.test' } }, include: { user: true } });
       expect(membership.role).toBe('owner');
-      expect(membership.user.email).toBe('andres@agencia.test');
       expect(membership.user.passwordHash).toBeNull();
+    });
+
+    it('un administrador de agencia entra como la subcuenta, no con su correo', async () => {
+      const company = await t.prisma.company.create({ data: { name: 'San Salvador', ghlLocationId: 'loc_agencia' } });
+      await t.prisma.ghlInstallation.create({ data: { companyId: company.id, ghlLocationId: 'loc_agencia', installationStatus: 'active', grantedScopes: ['contacts.readonly'], installedAt: new Date() } });
+      const res = await post(ctx({ activeLocation: 'loc_agencia', email: 'andres@agencia.test', userId: 'ghl_andres', userName: 'Andrés' }));
+      expect(res.status).toBe(200);
+      const me = await request(t.app.getHttpServer()).get('/api/v1/auth/me').set('Cookie', String(res.headers['set-cookie']).split(';')[0]);
+      expect(me.body.user.email).toBe('loc_agencia@subcuenta.aida');
+      expect(me.body.user.displayName).toBe('San Salvador');
+      expect(me.body.company.id).toBe(company.id);
+      expect(await t.prisma.user.findUnique({ where: { email: 'andres@agencia.test' } })).toBeNull();
     });
 
     it('rechaza location no vinculada, usuario sin membresía, secreto incorrecto y sin subcuenta activa', async () => {
       await connect();
       expect((await post(ctx({ activeLocation: 'otra' }))).status).toBe(401);
-      expect((await post(ctx({ email: 'sur@aida.test', userId: 'ghl_user_9' }))).status).toBe(401);
+      expect((await post(ctx({ type: 'account', email: 'sur@aida.test', userId: 'ghl_user_9' }))).status).toBe(401);
       expect((await post(encryptGhlContextForTests({ userId: 'u', email: 'demo@aida.test', activeLocation: 'loc_test_123' }, 'otro-secreto'))).status).toBe(401);
       expect((await post(ctx({ activeLocation: undefined }))).status).toBe(401);
     });

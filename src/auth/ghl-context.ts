@@ -12,6 +12,8 @@ export const ghlUserContextSchema = z.object({
   type: z.string().max(32).optional(),
   activeLocation: z.string().min(1).max(128).optional(),
   userName: z.string().max(200).optional(),
+  locationName: z.string().max(200).optional(),
+  activeLocationName: z.string().max(200).optional(),
   email: z.string().email().max(254),
 });
 export type GhlUserContext = z.infer<typeof ghlUserContextSchema>;
