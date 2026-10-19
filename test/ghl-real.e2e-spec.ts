@@ -344,6 +344,17 @@ describe('Integración GHL en modo real (API simulada por HTTP)', () => {
       expect((await post(payload)).status).toBe(401); // anti-replay
     });
 
+    it('el primer usuario de una subcuenta sin miembros entra como propietario', async () => {
+      const company = await t.prisma.company.create({ data: { name: 'Subcuenta nueva', ghlLocationId: 'loc_sin_miembros' } });
+      await t.prisma.ghlInstallation.create({ data: { companyId: company.id, ghlLocationId: 'loc_sin_miembros', installationStatus: 'active', grantedScopes: ['contacts.readonly'], installedAt: new Date() } });
+      const res = await post(ctx({ activeLocation: 'loc_sin_miembros', email: 'andres@agencia.test', userId: 'ghl_andres', userName: 'Andrés' }));
+      expect(res.status).toBe(200);
+      const membership = await t.prisma.membership.findFirstOrThrow({ where: { companyId: company.id }, include: { user: true } });
+      expect(membership.role).toBe('owner');
+      expect(membership.user.email).toBe('andres@agencia.test');
+      expect(membership.user.passwordHash).toBeNull();
+    });
+
     it('rechaza location no vinculada, usuario sin membresía, secreto incorrecto y sin subcuenta activa', async () => {
       await connect();
       expect((await post(ctx({ activeLocation: 'otra' }))).status).toBe(401);

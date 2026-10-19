@@ -113,19 +113,31 @@ export class AuthController {
     const installation = await this.prisma.ghlInstallation.findUnique({ where: { companyId: company.id } });
     if (this.config.ghl.mode === 'real' && installation?.installationStatus !== 'active') throw rejected('installation_inactive');
 
-    const user = await this.prisma.user.findFirst({
-      where: { status: 'active', OR: [{ ghlUserId: ctx.userId }, { email: ctx.email.toLowerCase(), ghlUserId: null }] },
-      include: { memberships: { where: { companyId: company.id, status: 'active' } } },
+    const email = ctx.email.toLowerCase();
+    const access = await this.prisma.$transaction(async tx => {
+      const memberCount = await tx.membership.count({ where: { companyId: company.id, status: 'active' } });
+      let user = await tx.user.findFirst({ where: { status: 'active', OR: [{ ghlUserId: ctx.userId }, { email }] } });
+      if (user?.ghlUserId && user.ghlUserId !== ctx.userId) return null;
+      const membership = user ? await tx.membership.findFirst({ where: { userId: user.id, companyId: company.id, status: 'active' } }) : null;
+      if (user && membership) return { user, membership };
+      // La instalación desde Marketplace crea la empresa sin miembros. El primer usuario de esa subcuenta entra como propietario.
+      if (memberCount > 0) return null;
+      if (!user) {
+        user = await tx.user.create({ data: { email, displayName: ctx.userName?.trim() || email, ghlUserId: ctx.userId } });
+      } else if (!user.ghlUserId) {
+        user = await tx.user.update({ where: { id: user.id }, data: { ghlUserId: ctx.userId } });
+      }
+      const created = await tx.membership.create({ data: { userId: user.id, companyId: company.id, role: 'owner' } });
+      return { user, membership: created };
     });
-    const membership = user?.memberships[0];
-    if (!user || !membership) throw rejected('unmapped_user');
+    if (!access) throw rejected('unmapped_user');
+    const { user } = access;
 
     try {
       await this.prisma.ghlContextGrant.create({ data: { payloadHash: createHash('sha256').update(body.encryptedData).digest('hex'), expiresAt: new Date(Date.now() + 24 * 3600_000) } });
     } catch {
       throw rejected('replayed');
     }
-    if (!user.ghlUserId) await this.prisma.user.update({ where: { id: user.id }, data: { ghlUserId: ctx.userId } });
 
     const session = await this.sessions.create(user.id, company.id, 'ghl_context');
     res.cookie(SESSION_COOKIE, session.token, this.sessions.cookieOptions(session.ttlMs));
