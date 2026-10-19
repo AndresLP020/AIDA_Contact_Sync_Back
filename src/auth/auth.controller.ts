@@ -86,8 +86,7 @@ export class AuthController {
 
   /**
    * Acceso incrustado (Custom Page de GHL): el frontend reenvía el payload cifrado recibido por postMessage.
-   * Se descifra con el Shared Secret de la app, se aplica anti-replay y se exige que el usuario GHL esté
-   * vinculado a una Membership de la empresa dueña de esa location. Sólo entonces se emite una sesión propia.
+   * Se descifra con el Shared Secret, se exige la location instalada y se emite la sesión de esa subcuenta.
    */
   @Post('ghl-context')
   @Public()
@@ -98,58 +97,47 @@ export class AuthController {
     if (!this.config.ghl.sharedSecret) throw forbidden('GHL_CONTEXT_DISABLED', 'El acceso incrustado no está configurado (GHL_APP_SHARED_SECRET)');
     const rejected = (reason: string) => {
       this.logger.warn({ msg: 'ghl_context_rejected', reason, correlationId });
-      return new AppError(401, 'GHL_CONTEXT_INVALID', 'Contexto de GHL inválido, expirado o no vinculado');
+      const message: Record<string, string> = {
+        decrypt_failed: 'No se pudo leer el contexto de GoHighLevel.',
+        no_active_location: 'El contexto no incluye la subcuenta activa.',
+        unknown_location: 'Esta subcuenta no está registrada en AIDA.',
+        installation_inactive: 'La instalación de esta subcuenta no está activa.',
+        replayed: 'El contexto de GoHighLevel ya se usó. Recarga la página desde el menú.',
+      };
+      return new AppError(401, 'GHL_CONTEXT_INVALID', message[reason] ?? 'Contexto de GHL inválido, expirado o no vinculado');
     };
     let ctx;
     try {
       ctx = decryptGhlContext(body.encryptedData, this.config.ghl.sharedSecret);
-    } catch {
+    } catch (error) {
+      const detail = error instanceof Error ? error.message.slice(0, 120) : 'decrypt_failed';
+      this.logger.warn({ msg: 'ghl_context_decrypt_failed', detail, correlationId });
       throw rejected('decrypt_failed');
     }
-    // Se usa activeLocation (contexto de subcuenta). Un usuario de agencia sin subcuenta activa no se acepta.
-    if (!ctx.activeLocation) throw rejected('no_active_location');
+    // La Custom Page se abre dentro de una subcuenta. La sesión es de esa location, no del administrador de agencia.
     const company = await this.prisma.company.findUnique({ where: { ghlLocationId: ctx.activeLocation } });
     if (!company || company.status !== 'active') throw rejected('unknown_location');
     const installation = await this.prisma.ghlInstallation.findUnique({ where: { companyId: company.id } });
     if (this.config.ghl.mode === 'real' && installation?.installationStatus !== 'active') throw rejected('installation_inactive');
 
-    const email = ctx.email.toLowerCase();
-    const agencyUser = (ctx.type ?? '').toLowerCase() === 'agency';
-    const access = await this.prisma.$transaction(async tx => {
-      // Un administrador de agencia que abre la subcuenta no se convierte en el usuario de esa empresa.
-      // La sesión es de la subcuenta instalada.
-      if (agencyUser) {
-        const locationKey = `location:${ctx.activeLocation}`;
-        const displayName = ctx.activeLocationName?.trim() || ctx.locationName?.trim() || company.name?.trim() || 'Subcuenta';
-        const locationEmail = `${ctx.activeLocation!.toLowerCase()}@subcuenta.aida`;
-        const user = await tx.user.upsert({
-          where: { ghlUserId: locationKey },
-          create: { email: locationEmail, displayName, ghlUserId: locationKey },
-          update: { displayName },
-        });
-        const membership = await tx.membership.upsert({
-          where: { userId_companyId: { userId: user.id, companyId: company.id } },
-          create: { userId: user.id, companyId: company.id, role: 'owner' },
-          update: { status: 'active' },
-        });
-        return { user, membership };
-      }
-      const memberCount = await tx.membership.count({ where: { companyId: company.id, status: 'active' } });
-      let user = await tx.user.findFirst({ where: { status: 'active', OR: [{ ghlUserId: ctx.userId }, { email }] } });
-      if (user?.ghlUserId && user.ghlUserId !== ctx.userId) return null;
-      const membership = user ? await tx.membership.findFirst({ where: { userId: user.id, companyId: company.id, status: 'active' } }) : null;
-      if (user && membership) return { user, membership };
-      if (memberCount > 0) return null;
-      if (!user) {
-        user = await tx.user.create({ data: { email, displayName: ctx.userName?.trim() || email, ghlUserId: ctx.userId } });
-      } else if (!user.ghlUserId) {
-        user = await tx.user.update({ where: { id: user.id }, data: { ghlUserId: ctx.userId } });
-      }
-      const created = await tx.membership.create({ data: { userId: user.id, companyId: company.id, role: 'owner' } });
-      return { user, membership: created };
+    const locationKey = `location:${ctx.activeLocation}`;
+    const locationEmail = `${ctx.activeLocation.toLowerCase()}@subcuenta.aida`;
+    const displayName = ctx.activeLocationName?.trim() || ctx.locationName?.trim() || company.name?.trim() || 'Subcuenta';
+    const user = await this.prisma.$transaction(async tx => {
+      const existing = await tx.user.findFirst({ where: { OR: [{ ghlUserId: locationKey }, { email: locationEmail }] } });
+      const locationUser = existing
+        ? await tx.user.update({
+            where: { id: existing.id },
+            data: { displayName, status: 'active', ...(existing.ghlUserId ? {} : { ghlUserId: locationKey }) },
+          })
+        : await tx.user.create({ data: { email: locationEmail, displayName, ghlUserId: locationKey } });
+      await tx.membership.upsert({
+        where: { userId_companyId: { userId: locationUser.id, companyId: company.id } },
+        create: { userId: locationUser.id, companyId: company.id, role: 'owner' },
+        update: { status: 'active' },
+      });
+      return locationUser;
     });
-    if (!access) throw rejected('unmapped_user');
-    const { user } = access;
 
     const payloadHash = createHash('sha256').update(body.encryptedData).digest('hex');
     try {
