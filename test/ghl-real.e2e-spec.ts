@@ -329,7 +329,7 @@ describe('Integración GHL en modo real (API simulada por HTTP)', () => {
 
   describe('Acceso incrustado (Custom Page): contexto cifrado → sesión propia', () => {
     const ctx = (over: object = {}) => encryptGhlContextForTests({ userId: 'ghl_user_1', companyId: 'agency_1', role: 'admin', type: 'agency', activeLocation: 'loc_test_123', userName: 'Ana', email: 'demo@aida.test', ...over }, ENV.GHL_APP_SHARED_SECRET);
-    const post = (encryptedData: string) => request(t.app.getHttpServer()).post('/api/v1/auth/ghl-context').set('Origin', ORIGIN).send({ encryptedData });
+    const post = (encryptedData: string, locationName?: string) => request(t.app.getHttpServer()).post('/api/v1/auth/ghl-context').set('Origin', ORIGIN).send({ encryptedData, ...(locationName ? { locationName } : {}) });
 
     it('contexto válido abre la sesión de la subcuenta instalada', async () => {
       await connect();
@@ -355,6 +355,16 @@ describe('Integración GHL en modo real (API simulada por HTTP)', () => {
       expect(membership.user.passwordHash).toBeNull();
       expect(membership.user.displayName).toBe('Subcuenta nueva');
       expect(await t.prisma.user.findUnique({ where: { email: 'persona@subcuenta.test' } })).toBeNull();
+    });
+
+    it('usa el nombre de la subcuenta que HighLevel pone en la URL de la Custom Page', async () => {
+      const company = await t.prisma.company.create({ data: { name: null, ghlLocationId: 'loc_jazomin' } });
+      await t.prisma.ghlInstallation.create({ data: { companyId: company.id, ghlLocationId: 'loc_jazomin', installationStatus: 'active', grantedScopes: ['contacts.readonly'], installedAt: new Date() } });
+      const res = await post(ctx({ activeLocation: 'loc_jazomin', userName: 'Andrés' }), 'Jazomin');
+      expect(res.status).toBe(200);
+      const me = await request(t.app.getHttpServer()).get('/api/v1/auth/me').set('Cookie', String(res.headers['set-cookie']).split(';')[0]);
+      expect(me.body.user.displayName).toBe('Jazomin');
+      expect(me.body.company.name).toBe('Jazomin');
     });
 
     it('un administrador de agencia entra como la subcuenta, no con su correo', async () => {

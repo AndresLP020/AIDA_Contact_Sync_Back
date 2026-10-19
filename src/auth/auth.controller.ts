@@ -22,6 +22,14 @@ class LoginDto {
 
 class GhlContextDto {
   @IsString() @MinLength(40) @MaxLength(8192) encryptedData!: string;
+  /** Nombre que HighLevel sustituye en la URL de la Custom Page ({{location.name}}). */
+  @IsOptional() @IsString() @MaxLength(200) locationName?: string;
+}
+
+function cleanLocationName(value: string | null | undefined): string | null {
+  const name = value?.replace(/[\u0000-\u001f]/g, '').trim();
+  if (!name || name.includes('{{') || name === 'Subcuenta') return null;
+  return name.slice(0, 200);
 }
 
 const loginLimit = () => Number(process.env.LOGIN_RATE_LIMIT_PER_MINUTE ?? 10);
@@ -122,8 +130,11 @@ export class AuthController {
 
     const locationKey = `location:${ctx.activeLocation}`;
     const locationEmail = `${ctx.activeLocation.toLowerCase()}@subcuenta.aida`;
-    const displayName = ctx.activeLocationName?.trim() || ctx.locationName?.trim() || company.name?.trim() || 'Subcuenta';
+    const displayName = cleanLocationName(ctx.activeLocationName) || cleanLocationName(ctx.locationName) || cleanLocationName(body.locationName) || cleanLocationName(company.name) || 'Subcuenta';
     const user = await this.prisma.$transaction(async tx => {
+      if (displayName !== 'Subcuenta' && displayName !== company.name) {
+        await tx.company.update({ where: { id: company.id }, data: { name: displayName } });
+      }
       const existing = await tx.user.findFirst({ where: { OR: [{ ghlUserId: locationKey }, { email: locationEmail }] } });
       const locationUser = existing
         ? await tx.user.update({
